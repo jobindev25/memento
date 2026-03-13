@@ -5,6 +5,9 @@ import { useEffect, useRef, useState } from "react";
 export default function Home() {
   const [isConnected, setIsConnected] = useState(false);
   const [status, setStatus] = useState("Ready to connect");
+  const [isAiSpeaking, setIsAiSpeaking] = useState(false);
+  const speakingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -201,6 +204,17 @@ export default function Home() {
     }
     source.start(nextPlayTimeRef.current);
     nextPlayTimeRef.current += buffer.duration;
+
+    // Set speaking state
+    setIsAiSpeaking(true);
+    if (speakingTimeoutRef.current) clearTimeout(speakingTimeoutRef.current);
+    
+    // Calculate when this specific audio buffer will actually finish playing
+    const timeUntilEndMs = Math.max(0, (nextPlayTimeRef.current - ctx.currentTime) * 1000);
+    
+    speakingTimeoutRef.current = setTimeout(() => {
+      setIsAiSpeaking(false);
+    }, timeUntilEndMs + 200); // 200ms padding
   };
 
   const stopStreaming = () => {
@@ -229,67 +243,91 @@ export default function Home() {
   }, []);
 
   return (
-    <main className="min-h-screen bg-gradient-to-br from-slate-900 to-indigo-950 flex flex-col items-center justify-center p-8 text-neutral-100 font-sans transition-all duration-1000">
+    <main className={`min-h-screen flex flex-col items-center justify-center p-8 font-sans transition-all duration-[3000ms] ease-in-out ${
+      isConnected 
+        ? "bg-gradient-to-br from-indigo-900 via-purple-900 to-slate-900 animate-slow-pan" 
+        : "bg-gradient-to-br from-slate-900 to-slate-950"
+    }`}>
       
       {/* Hidden processing elements */}
       <video ref={videoRef} className="hidden" muted playsInline />
       <canvas ref={canvasRef} width={320} height={240} className="hidden" />
 
       {/* Ambient Interface */}
-      <div className="flex-1 flex flex-col items-center justify-center space-y-12">
-        <h1 className="text-8xl md:text-9xl font-light tracking-tight text-white/90 drop-shadow-sm">
+      <div className="flex-1 flex flex-col items-center justify-center w-full max-w-2xl relative">
+        
+        {/* Breathing Aura when connected */}
+        <div className={`absolute inset-0 bg-white/5 rounded-full blur-[100px] pointer-events-none transition-opacity duration-1000 ${
+          isConnected ? "opacity-100 animate-breathe" : "opacity-0"
+        }`} />
+
+        <h1 className="text-[12rem] leading-none font-extralight tracking-tighter text-white/90 drop-shadow-2xl z-10 select-none">
           {time || "..."}
         </h1>
         
-        <div className="relative">
-          {isConnected && (
-             <div className="absolute -inset-4 bg-indigo-500/20 rounded-full blur-xl animate-pulse"></div>
-          )}
-          <div className="relative text-2xl font-medium text-indigo-100 flex items-center gap-3 bg-white/5 px-6 py-3 rounded-2xl backdrop-blur-md border border-white/10 shadow-xl">
-             <div className={`w-3 h-3 rounded-full ${isConnected ? "bg-emerald-400 animate-pulse" : "bg-rose-400"}`}></div>
-             {status}
-          </div>
-        </div>
-
-        {!isConnected ? (
-          <button 
-            onClick={connectToMemento}
-            className="mt-8 px-10 py-4 bg-white/10 hover:bg-white/20 text-white rounded-full font-semibold transition-all shadow-lg border border-white/10 active:scale-95"
-          >
-            Start Companion
-          </button>
-        ) : (
-          <form 
-            onSubmit={(e) => {
-              e.preventDefault();
-              const form = e.target as HTMLFormElement;
-              const input = form.elements.namedItem("message") as HTMLInputElement;
-              if (input.value && wsRef.current?.readyState === WebSocket.OPEN) {
-                // Send a client content message containing text
-                wsRef.current.send(JSON.stringify({
-                  clientContent: {
-                    turns: [{
-                      role: "user",
-                      parts: [{ text: input.value }]
-                    }],
-                    turnComplete: true
+        <div className="mt-8 z-10 transition-all duration-700">
+          {!isConnected ? (
+            <div className="flex flex-col items-center space-y-6">
+              <button 
+                onClick={connectToMemento}
+                className="px-12 py-5 bg-white/10 hover:bg-white/20 text-white/90 text-xl tracking-wide rounded-full backdrop-blur-md transition-all border border-white/20 hover:border-white/40 shadow-[0_0_40px_rgba(255,255,255,0.1)] hover:shadow-[0_0_60px_rgba(255,255,255,0.2)] active:scale-95 flex items-center gap-3"
+              >
+                <div className="w-3 h-3 rounded-full bg-indigo-400 animate-pulse" />
+                Start Companion
+              </button>
+              <p className="text-white/40 text-sm tracking-widest uppercase">Memento Ambient Display</p>
+            </div>
+          ) : (
+            <div className="flex flex-col items-center space-y-12 animate-fade-in">
+              <div className={`flex items-center gap-5 px-8 py-4 backdrop-blur-xl rounded-full border shadow-2xl transition-all duration-500 ${isAiSpeaking ? 'bg-indigo-900/60 border-indigo-400/40 scale-105' : 'bg-black/20 border-white/10 scale-100'}`}>
+                 <div className="flex gap-1.5 items-center h-5">
+                    {isAiSpeaking ? (
+                      <>
+                        <div className="w-1.5 h-3 rounded-full bg-indigo-300 animate-[bounce_1s_infinite_ease-in-out]" style={{ animationDelay: "0ms" }} />
+                        <div className="w-1.5 h-6 rounded-full bg-indigo-300 animate-[bounce_1s_infinite_ease-in-out]" style={{ animationDelay: "200ms" }} />
+                        <div className="w-1.5 h-3 rounded-full bg-indigo-300 animate-[bounce_1s_infinite_ease-in-out]" style={{ animationDelay: "400ms" }} />
+                      </>
+                    ) : (
+                      <>
+                        <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-bounce" style={{ animationDelay: "0ms" }} />
+                        <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-bounce" style={{ animationDelay: "150ms" }} />
+                        <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-bounce" style={{ animationDelay: "300ms" }} />
+                      </>
+                    )}
+                 </div>
+                 <span className={`${isAiSpeaking ? 'text-indigo-100' : 'text-emerald-100/80'} font-medium tracking-wide transition-colors`}>
+                   {isAiSpeaking ? 'Speaking...' : 'Listening'}
+                 </span>
+              </div>
+              
+              <form 
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const form = e.target as HTMLFormElement;
+                  const input = form.elements.namedItem("message") as HTMLInputElement;
+                  if (input.value && wsRef.current?.readyState === WebSocket.OPEN) {
+                    wsRef.current.send(JSON.stringify({
+                      clientContent: {
+                        turns: [{ role: "user", parts: [{ text: input.value }] }],
+                        turnComplete: true
+                      }
+                    }));
+                    input.value = "";
                   }
-                }));
-                input.value = "";
-              }
-            }}
-            className="w-full max-w-md pt-8 opacity-50 focus-within:opacity-100 transition-opacity"
-          >
-            <input 
-              name="message"
-              type="text" 
-              placeholder="Type a message (audio fallback)..." 
-              className="w-full bg-white/5 border border-white/10 rounded-full px-6 py-3 text-white placeholder:text-white/30 focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
-            />
-          </form>
-        )}
+                }}
+                className="w-full max-w-md opacity-30 hover:opacity-100 focus-within:opacity-100 transition-opacity duration-500"
+              >
+                <input 
+                  name="message"
+                  type="text" 
+                  placeholder="Type to AI (fallback)..." 
+                  className="w-full bg-white/5 border border-white/10 rounded-full px-6 py-3 text-white placeholder:text-white/40 focus:outline-none focus:ring-1 focus:ring-indigo-400/50 backdrop-blur-md text-center"
+                />
+              </form>
+            </div>
+          )}
+        </div>
       </div>
-
     </main>
   );
 }

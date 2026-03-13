@@ -3,7 +3,7 @@ const { parse } = require('url');
 const next = require('next');
 const { WebSocketServer } = require('ws');
 const { GoogleGenAI, Modality } = require('@google/genai');
-
+const { fetchPatientContext } = require('./lib/memoryBank');
 const dev = process.env.NODE_ENV !== 'production';
 const app = next({ dev });
 const handle = app.getRequestHandler();
@@ -43,6 +43,15 @@ app.prepare().then(() => {
       if (!ai) {
         ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
       }
+
+      // 1. Fetch the patient context from GCP Cloud Storage (Memory Bank)
+      // Hardcoding 'patient_001' for the hackathon prototype
+      const patientContext = await fetchPatientContext('patient_001');
+
+      // 2. Construct the final system instruction
+      const baseInstruction = "You are Memento, an ambient, always-on AI companion for a dementia patient. You are infinitely patient, calming, and proactive. You monitor their visual environment and converse with them. If you observe any emergency or dangerous situation (e.g., wandering at night, a fall, leaving the stove on), you MUST immediately call the dispatch_caregiver_call tool with an incident_message detailing the situation. Otherwise, converse normally and comfortingly.";
+      const finalInstruction = baseInstruction + "\n\n" + patientContext;
+
       session = await ai.live.connect({
         model: 'gemini-2.5-flash-native-audio-latest', // The current Live API model
         config: {
@@ -56,7 +65,7 @@ app.prepare().then(() => {
           },
           systemInstruction: {
             parts: [{
-              text: "You are Memento, an ambient, always-on AI companion for a dementia patient. You are infinitely patient, calming, and proactive. You monitor their visual environment and converse with them. If you observe any emergency or dangerous situation (e.g., wandering at night, a fall, leaving the stove on), you MUST immediately call the dispatch_caregiver_call tool with an incident_message detailing the situation. Otherwise, converse normally and comfortingly."
+              text: finalInstruction
             }]
           },
           tools: [{

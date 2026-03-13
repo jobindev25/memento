@@ -24,3 +24,34 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+@keyframes slow-pan {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+@keyframes breathe {
+  0% { transform: scale(0.9); opacity: 0.5; }
+  50% { transform: scale(1.1); opacity: 0.8; }
+  100% { transform: scale(0.9); opacity: 0.5; }
+}
+
+@keyframes subtle-pulse {
+  0% { opacity: 0.4; transform: scale(0.95); }
+  50% { opacity: 0.6; transform: scale(1); }
+  100% { opacity: 0.4; transform: scale(0.95); }
+}
+
+.animate-slow-pan {
+  background-size: 200% 200%;
+  animation: slow-pan 20s ease infinite;
+}
+
+.animate-breathe {
+  animation: breathe 5s ease-in-out infinite;
+}
+
+.animate-subtle-pulse {
+  animation: subtle-pulse 4s ease-in-out infinite;
+}
