@@ -3,7 +3,9 @@ const { parse } = require('url');
 const next = require('next');
 const { WebSocketServer } = require('ws');
 const { GoogleGenAI, Modality } = require('@google/genai');
+const { WaveFile } = require('wavefile');
 const { fetchPatientContext } = require('./lib/memoryBank');
+const { notifyCaregiver } = require('./lib/twilioService');
 const dev = process.env.NODE_ENV !== 'production';
 const app = next({ dev });
 const handle = app.getRequestHandler();
@@ -25,14 +27,20 @@ app.prepare().then(() => {
 
   server.on('upgrade', (request, socket, head) => {
     const { pathname } = parse(request.url || '', true);
-    
+    console.log(`[Upgrade] Incoming request for: ${pathname}`);
+
     if (pathname === '/api/ws_live') {
       console.log(`[Server] Upgrading to Memento WebSocket...`);
       wss.handleUpgrade(request, socket, head, (ws) => {
         wss.emit('connection', ws, request);
       });
-    } else if (request.url?.startsWith('/_next/webpack-hmr')) {
+    } else if (pathname === '/api/twilio_stream') {
+      console.log(`[Server] Upgrading to Twilio Media Stream WebSocket...`);
+      wss.handleUpgrade(request, socket, head, (ws) => {
+        setupTwilioMediaStream(ws);
+      });
     } else {
+      console.log(`[Upgrade] Rejected upgrade for: ${pathname}`);
     }
   });
 
@@ -88,10 +96,17 @@ app.prepare().then(() => {
               if (msg.toolCall) {
                 const functionCalls = msg.toolCall.functionCalls;
                 const ftc = functionCalls && functionCalls.find((f) => f.name === 'dispatch_caregiver_call');
-                
+
                 if (ftc) {
                   console.log(`\n\n[ALARM] Caregiver called! Incident: ${ftc.args.incident_message}\n\n`);
-                  
+
+                  // Call the Twilio Service
+                  try {
+                    notifyCaregiver(ftc.args.incident_message);
+                  } catch (e) {
+                    console.error('[Server] Twilio alert failed:', e);
+                  }
+
                   // Use official typed method for tool response
                   session.sendToolResponse({
                     functionResponses: [{
@@ -107,7 +122,7 @@ app.prepare().then(() => {
                 for (const p of parts) {
                   if (p.inlineData) {
                     console.log("[Server] Received audio part. inlineData.data type:", typeof p.inlineData.data, "isBuffer:", Buffer.isBuffer(p.inlineData.data));
-                    
+
                     // IF it's a buffer, JSON.stringify turns it into an object {type:"Buffer", data:[...]} which breaks frontend!
                     // Let's coerce it to base64 if it's a buffer or object.
                     if (Buffer.isBuffer(p.inlineData.data)) {
@@ -122,7 +137,7 @@ app.prepare().then(() => {
 
               // Forward the overall object to the frontend
               ws.send(JSON.stringify(msg));
-            } catch(e) {
+            } catch (e) {
               console.error('[Server] Error handling Gemini message:', e);
             }
           },
@@ -142,26 +157,33 @@ app.prepare().then(() => {
       return;
     }
 
-    // Relay Frontend chunks into Gemini Live API Session using official methods
+    // Relay Frontend chunks into Gemini Live API Session
     ws.on('message', (data) => {
       try {
+        const clientMsg = JSON.parse(data.toString());
+
+        // 1. Forward to the ambient companion session (if active)
         if (session) {
-          const clientMsg = JSON.parse(data.toString());
           if (clientMsg.realtimeInput) {
             session.sendRealtimeInput(clientMsg.realtimeInput);
           } else if (clientMsg.clientContent) {
-            // Unlikely from this frontend, but just in case
-            if (session.sendClientContent) session.sendClientContent(clientMsg.clientContent);
-            else if (session.conn) session.conn.send(data.toString());
-          } else if (session.conn) {
-            // Fallback for undocumented or control signals
-            if (session.conn.readyState === 1) {
-              session.conn.send(data.toString());
+            session.sendClientContent(clientMsg.clientContent);
+          }
+        }
+
+        // 2. Forward Vision to the Caregiver's Gemini session (if an emergency call is active)
+        if (activeTwilioGeminiSession && clientMsg.realtimeInput) {
+          const videoPart = clientMsg.realtimeInput.video;
+          if (videoPart && videoPart.mimeType && videoPart.mimeType.includes('image')) {
+            try {
+              activeTwilioGeminiSession.sendRealtimeInput([videoPart]);
+            } catch (err) {
+              console.error('[Server] Failed to forward vision:', err.message);
             }
           }
         }
-      } catch(e) {
-        console.error('[Server] Error sending to Gemini:', e);
+      } catch (e) {
+        console.error('[Server] Error relaying frontend message:', e);
       }
     });
 
@@ -169,6 +191,153 @@ app.prepare().then(() => {
       console.log('[Server] Frontend disconnected');
     });
   });
+
+  // ==========================================
+  // Twilio Media Stream -> Gemini Live Gateway
+  // ==========================================
+  // ==========================================
+  // Twilio Media Stream <-> Gemini Live Gateway
+  // ==========================================
+  let activeTwilioGeminiSession = null;
+
+  async function setupTwilioMediaStream(ws) {
+    let streamSid = null;
+    let twilioGeminiSession = null;
+    let mediaCount = 0;
+
+    console.log('[Twilio Stream] New connection request.');
+
+    if (!ai) {
+      ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    }
+
+    ws.on('message', async (message) => {
+      let msg;
+      try {
+        msg = JSON.parse(message);
+      } catch (e) {
+        return;
+      }
+
+      if (msg.event === 'start') {
+        streamSid = msg.start.streamSid;
+        const incidentContext = msg.start.customParameters?.incidentContext || "No context provided.";
+        console.log(`[Twilio Stream] START received. SID: ${streamSid}. Context: ${incidentContext}`);
+
+        try {
+          // Personality: Emergency Response Assistant
+          const callInstruction = `You are Memento's Emergency Response Assistant. You are on a phone call with a caregiver because of an emergency.
+          Incident: "${incidentContext}".
+          Your goal: Calmly explain the situation to the caregiver. Be professional and informative.`;
+
+          twilioGeminiSession = await ai.live.connect({
+            model: 'gemini-2.5-flash-native-audio-latest', 
+            config: {
+              responseModalities: [Modality.AUDIO],
+              systemInstruction: { parts: [{ text: callInstruction }] },
+              speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } } }
+            },
+            callbacks: {
+              onmessage: (geminiMsg) => {
+                if (geminiMsg.serverContent && geminiMsg.serverContent.modelTurn) {
+                  const modelTurn = geminiMsg.serverContent.modelTurn;
+                    const parts = modelTurn.parts;
+                    for (const p of parts) {
+                      if (p.inlineData && p.inlineData.data) {
+                        try {
+                          const audioData = p.inlineData.data;
+                          // Gemini: 24kHz PCM16 -> Twilio: 8kHz mu-law
+                          const audioBuffer = Buffer.isBuffer(audioData)
+                            ? audioData
+                            : (typeof audioData === 'string' ? Buffer.from(audioData, 'base64') : Buffer.from(audioData));
+
+                          const pcm16Samples = new Int16Array(audioBuffer.buffer, audioBuffer.byteOffset, audioBuffer.byteLength / 2);
+
+                          for (let i = 0; i < pcm16Samples.length; i++) {
+                            pcm16Samples[i] = Math.round(pcm16Samples[i] * 0.8);
+                          }
+
+                          let wav = new WaveFile();
+                          wav.fromScratch(1, 24000, '16', pcm16Samples);
+                          wav.toSampleRate(8000);
+                          wav.toMuLaw();
+
+                          const base64Audio = Buffer.from(wav.data.samples).toString('base64');
+
+                          if (ws.readyState === 1 && streamSid) {
+                            ws.send(JSON.stringify({
+                              event: 'media',
+                              streamSid: streamSid,
+                              media: { payload: base64Audio }
+                            }));
+                          }
+                        } catch (err) {
+                          console.error('[Twilio Stream] OUT Error:', err.message);
+                        }
+                      }
+                    }
+                  }
+                },
+              onerror: (e) => console.error('[Twilio Stream] Gemini Error:', e),
+              onclose: () => {
+                console.log('[Twilio Stream] Gemini session closed');
+                if (twilioGeminiSession === activeTwilioGeminiSession) activeTwilioGeminiSession = null;
+                twilioGeminiSession = null;
+              }
+            }
+          });
+
+          activeTwilioGeminiSession = twilioGeminiSession;
+          console.log('[Twilio Stream] Gemini session established.');
+
+          // Initial greeting trigger
+          twilioGeminiSession.sendClientContent({
+            turns: [{ role: 'user', parts: [{ text: "The caregiver has answered the phone. Please introduce yourself and explain the situation." }] }],
+            turnComplete: true
+          });
+
+        } catch (err) {
+          console.error('[Twilio Stream] Connect Failed:', err);
+        }
+      } else if (msg.event === 'media' && twilioGeminiSession) {
+        mediaCount++;
+        if (mediaCount % 100 === 0) console.log(`[Twilio Stream] Inbound Activity: ${mediaCount} packets received.`);
+
+        try {
+          const muLawBuffer = Buffer.from(msg.media.payload, 'base64');
+          let wav = new WaveFile();
+          wav.fromScratch(1, 8000, '8m', muLawBuffer);
+          wav.fromMuLaw();
+          wav.toSampleRate(16000);
+          wav.toBitDepth('16');
+
+          const pcmSamples = wav.data.samples;
+          const audioPayload = Buffer.from(pcmSamples.buffer, pcmSamples.byteOffset, pcmSamples.byteLength).toString('base64');
+
+          twilioGeminiSession.sendRealtimeInput([{
+            mimeType: 'audio/pcm;rate=16000',
+            data: audioPayload
+          }]);
+        } catch (err) {
+          // Skip media errors
+        }
+      } else if (msg.event === 'stop') {
+        console.log(`[Twilio Stream] STOP received for SID: ${streamSid}`);
+        if (twilioGeminiSession) {
+          twilioGeminiSession.close();
+          twilioGeminiSession = null;
+        }
+      }
+    });
+
+    ws.on('close', () => {
+      console.log('[Twilio Stream] WebSocket Closed');
+      if (twilioGeminiSession) {
+        twilioGeminiSession.close();
+        twilioGeminiSession = null;
+      }
+    });
+  }
 
   const PORT = process.env.PORT || 3000;
   server.listen(PORT, (err) => {
