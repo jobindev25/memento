@@ -1,0 +1,10 @@
+node_modules
+.next
+.git
+.env
+*.json
+!package.json
+!package-lock.json
+public/faces
+public/memories
+public/videos
